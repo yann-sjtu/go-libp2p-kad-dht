@@ -15,8 +15,9 @@ import (
 const ProtocolDHTOld protocol.ID = "/ipfs/dht"
 
 var (
-	ProtocolDHT      protocol.ID = "/ipfs/kad/1.0.0"
-	DefaultProtocols             = []protocol.ID{ProtocolDHT}
+	ProtocolDHT            protocol.ID = "/ipfs/kad/2.0.0"
+	DefaultProtocols                   = []protocol.ID{ProtocolDHT, "/ipfs/kad/1.0.0"}
+	DefaultClientProtocols             = []protocol.ID{ProtocolDHT}
 )
 
 // ModeOpt describes what mode the dht should operate in
@@ -38,6 +39,7 @@ type Options struct {
 	Validator       record.Validator
 	Mode            ModeOpt
 	Protocols       []protocol.ID
+	ClientProtocols []protocol.ID
 	BucketSize      int
 	DisjointPaths   int
 	Concurrency     int
@@ -73,7 +75,6 @@ var Defaults = func(o *Options) error {
 		"pk": record.PublicKeyValidator{},
 	}
 	o.Datastore = dssync.MutexWrap(ds.NewMapDatastore())
-	o.Protocols = DefaultProtocols
 	o.EnableProviders = true
 	o.EnableValues = true
 
@@ -85,6 +86,26 @@ var Defaults = func(o *Options) error {
 
 	o.BucketSize = 20
 	o.Concurrency = 3
+
+	return nil
+}
+
+// UnsetDefaults sets default DHT options. It is applied after Defaults and any options passed to the constructor in
+// order to allow for defaults that are based on other set options.
+func UnsetDefaults(o *Options) error {
+	if len(o.ClientProtocols) == 0 && len(o.Protocols) == 0 {
+		o.Protocols = DefaultProtocols
+		o.ClientProtocols = DefaultClientProtocols
+	}
+
+	// If no client protocols set, use the server protocols as client protocols
+	if len(o.ClientProtocols) == 0 {
+		o.ClientProtocols = append(o.Protocols[:0:0], o.Protocols...)
+	}
+
+	if o.DisjointPaths == 0 {
+		o.DisjointPaths = o.BucketSize / 2
+	}
 
 	return nil
 }
@@ -180,12 +201,23 @@ func NamespacedValidator(ns string, v record.Validator) Option {
 	}
 }
 
-// Protocols sets the protocols for the DHT
+// Protocols sets the protocols the DHT may respond to queries with
 //
 // Defaults to dht.DefaultProtocols
 func Protocols(protocols ...protocol.ID) Option {
 	return func(o *Options) error {
 		o.Protocols = protocols
+		return nil
+	}
+}
+
+// ClientProtocols sets the protocols the DHT uses to initiate connections and queries
+//
+// Defaults to dht.DefaultClientProtocols. If Protocols have been set the to the non-default protocols,
+// then ClientProtocols defaults to match Protocols.
+func ClientProtocols(protocols ...protocol.ID) Option {
+	return func(o *Options) error {
+		o.ClientProtocols = protocols
 		return nil
 	}
 }
