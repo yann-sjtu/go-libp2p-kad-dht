@@ -68,6 +68,8 @@ func (o *Options) Apply(opts ...Option) error {
 // Option DHT option type.
 type Option func(*Options) error
 
+const defaultBucketSize = 20
+
 // Defaults are the default DHT options. This option will be automatically
 // prepended to any options you pass to the DHT constructor.
 var Defaults = func(o *Options) error {
@@ -84,7 +86,7 @@ var Defaults = func(o *Options) error {
 	o.RoutingTable.AutoRefresh = true
 	o.MaxRecordAge = time.Hour * 36
 
-	o.BucketSize = 20
+	o.BucketSize = defaultBucketSize
 	o.Concurrency = 3
 
 	return nil
@@ -105,6 +107,20 @@ func UnsetDefaults(o *Options) error {
 
 	if o.DisjointPaths == 0 {
 		o.DisjointPaths = o.BucketSize / 2
+	}
+
+	for _, p := range o.Protocols {
+		if p == ProtocolDHT {
+			if o.BucketSize != defaultBucketSize {
+				return fmt.Errorf("protocol %s must use bucket size %d", ProtocolDHT, defaultBucketSize)
+			}
+			if !o.EnableProviders {
+				return fmt.Errorf("protocol %s must have providers enabled", ProtocolDHT)
+			}
+			if !o.EnableValues {
+				return fmt.Errorf("protocol %s must have values enabled", ProtocolDHT)
+			}
+		}
 	}
 
 	return nil
