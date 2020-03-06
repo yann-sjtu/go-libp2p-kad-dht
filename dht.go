@@ -37,6 +37,7 @@ import (
 )
 
 var logger = logging.Logger("dht")
+var rtPvLogger = logging.Logger("dht/rt/peer-validation")
 
 const BaseConnMgrScore = 5
 
@@ -88,6 +89,7 @@ type IpfsDHT struct {
 	rtRefreshQueryTimeout time.Duration
 	rtRefreshPeriod       time.Duration
 	triggerRtRefresh      chan chan<- error
+	triggerSelfLookup     chan chan<- error
 
 	maxRecordAge time.Duration
 
@@ -116,7 +118,11 @@ func New(ctx context.Context, h host.Host, options ...opts.Option) (*IpfsDHT, er
 	if cfg.DisjointPaths == 0 {
 		cfg.DisjointPaths = cfg.BucketSize / 2
 	}
-	dht := makeDHT(ctx, h, cfg)
+	dht, err := makeDHT(ctx, h, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DHT, err=%s", err)
+	}
+
 	dht.autoRefresh = cfg.RoutingTable.AutoRefresh
 	dht.rtRefreshPeriod = cfg.RoutingTable.RefreshPeriod
 	dht.rtRefreshQueryTimeout = cfg.RoutingTable.RefreshQueryTimeout
@@ -156,6 +162,7 @@ func New(ctx context.Context, h host.Host, options ...opts.Option) (*IpfsDHT, er
 	// handle providers
 	dht.proc.AddChild(dht.providers.Process())
 
+	dht.startSelfLookup()
 	dht.startRefreshing()
 	return dht, nil
 }
@@ -183,34 +190,27 @@ func NewDHTClient(ctx context.Context, h host.Host, dstore ds.Batching) *IpfsDHT
 	return dht
 }
 
-func makeDHT(ctx context.Context, h host.Host, cfg opts.Options) *IpfsDHT {
-	self := kb.ConvertPeerID(h.ID())
-	rt := kb.NewRoutingTable(cfg.BucketSize, self, cfg.RoutingTable.LatencyTolerance, h.Peerstore())
-	cmgr := h.ConnManager()
-
-	rt.PeerAdded = func(p peer.ID) {
-		commonPrefixLen := kb.CommonPrefixLen(self, kb.ConvertPeerID(p))
-		cmgr.TagPeer(p, "kbucket", BaseConnMgrScore+commonPrefixLen)
-	}
-
-	rt.PeerRemoved = func(p peer.ID) {
-		cmgr.UntagPeer(p, "kbucket")
+func makeDHT(ctx context.Context, h host.Host, cfg opts.Options) (*IpfsDHT, error) {
+	rt, err := makeRoutingTable(h, &cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct routing table,err=%s", err)
 	}
 
 	dht := &IpfsDHT{
-		datastore:        cfg.Datastore,
-		self:             h.ID(),
-		peerstore:        h.Peerstore(),
-		host:             h,
-		strmap:           make(map[peer.ID]*messageSender),
-		birth:            time.Now(),
-		rng:              rand.New(rand.NewSource(rand.Int63())),
-		routingTable:     rt,
-		protocols:        cfg.Protocols,
-		bucketSize:       cfg.BucketSize,
-		alpha:            cfg.Concurrency,
-		d:                cfg.DisjointPaths,
-		triggerRtRefresh: make(chan chan<- error),
+		datastore:         cfg.Datastore,
+		self:              h.ID(),
+		peerstore:         h.Peerstore(),
+		host:              h,
+		strmap:            make(map[peer.ID]*messageSender),
+		birth:             time.Now(),
+		rng:               rand.New(rand.NewSource(rand.Int63())),
+		routingTable:      rt,
+		protocols:         cfg.Protocols,
+		bucketSize:        cfg.BucketSize,
+		alpha:             cfg.Concurrency,
+		d:                 cfg.DisjointPaths,
+		triggerRtRefresh:  make(chan chan<- error),
+		triggerSelfLookup: make(chan chan<- error),
 	}
 
 	// create a DHT proc with the given context
@@ -223,7 +223,38 @@ func makeDHT(ctx context.Context, h host.Host, cfg opts.Options) *IpfsDHT {
 
 	dht.providers = providers.NewProviderManager(dht.ctx, h.ID(), cfg.Datastore)
 
-	return dht
+	return dht, nil
+}
+
+func makeRoutingTable(h host.Host, cfg *opts.Options) (*kb.RoutingTable, error) {
+	self := kb.ConvertPeerID(h.ID())
+	// construct the routing table with a peer validation function
+	pvF := func(c context.Context, p peer.ID) bool {
+		if err := h.Connect(c, peer.AddrInfo{ID: p}); err != nil {
+			rtPvLogger.Errorf("failed to connect to peer %s for validation, err=%s", p, err)
+			return false
+		}
+		return true
+	}
+
+	rtOpts := []kb.Option{kb.PeerValidationFnc(pvF)}
+	if !(cfg.RoutingTable.CleanupInterval == 0) {
+		rtOpts = append(rtOpts, kb.TableCleanupInterval(cfg.RoutingTable.CleanupInterval))
+	}
+
+	rt, err := kb.NewRoutingTable(cfg.BucketSize, self, time.Minute, h.Peerstore(),
+		rtOpts...)
+	cmgr := h.ConnManager()
+
+	rt.PeerAdded = func(p peer.ID) {
+		commonPrefixLen := kb.CommonPrefixLen(self, kb.ConvertPeerID(p))
+		cmgr.TagPeer(p, "kbucket", BaseConnMgrScore+commonPrefixLen)
+	}
+	rt.PeerRemoved = func(p peer.ID) {
+		cmgr.UntagPeer(p, "kbucket")
+	}
+
+	return rt, err
 }
 
 // TODO Implement RT seeding as described in https://github.com/libp2p/go-libp2p-kad-dht/pull/384#discussion_r320994340 OR
@@ -372,11 +403,26 @@ func (dht *IpfsDHT) putLocal(key string, rec *recpb.Record) error {
 	return dht.datastore.Put(mkDsKey(key), data)
 }
 
-// Update signals the routingTable to Update its last-seen status
-// on the given peer.
-func (dht *IpfsDHT) Update(ctx context.Context, p peer.ID) {
-	logger.Event(ctx, "updatePeer", p)
-	dht.routingTable.Update(p)
+// peerFound signals the routingTable that we've found a peer that
+// supports the DHT protocol.
+func (dht *IpfsDHT) peerFound(ctx context.Context, p peer.ID) {
+	logger.Event(ctx, "peerFound", p)
+	dht.routingTable.HandlePeerAlive(p)
+}
+
+// peerStoppedDHT signals the routing table that a peer has stopped supporting the DHT protocol.
+func (dht *IpfsDHT) peerStoppedDHT(ctx context.Context, p peer.ID) {
+	logger.Event(ctx, "peerStoppedDHT", p)
+	// A peer that does not support the DHT protocol is dead for us.
+	// There's no point in talking to anymore till it starts supporting the DHT protocol again.
+	dht.routingTable.HandlePeerDead(p)
+}
+
+// peerDisconnected signals the routing table that a peer is not connected anymore.
+func (dht *IpfsDHT) peerDisconnected(ctx context.Context, p peer.ID) {
+	logger.Event(ctx, "peerDisconnected", p)
+	dht.routingTable.HandlePeerDisconnect(p)
+
 }
 
 // FindLocal looks for a peer with a given ID connected to this dht and returns the peer and the table it was found in.

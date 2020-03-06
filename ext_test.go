@@ -41,7 +41,7 @@ func TestHungRequest(t *testing.T) {
 		defer s.Reset()
 		<-ctx.Done()
 	})
-	d.Update(ctx, hosts[1].ID())
+	d.peerFound(ctx, hosts[1].ID())
 
 	ctx1, cancel1 := context.WithTimeout(ctx, 1*time.Second)
 	defer cancel1()
@@ -215,7 +215,7 @@ func TestNotFound(t *testing.T) {
 	}
 
 	for _, p := range hosts {
-		d.Update(ctx, p.ID())
+		d.peerFound(ctx, p.ID())
 	}
 
 	// Reply with random peers to every message
@@ -295,7 +295,7 @@ func TestLessThanKResponses(t *testing.T) {
 	}
 
 	for i := 1; i < 5; i++ {
-		d.Update(ctx, hosts[i].ID())
+		d.peerFound(ctx, hosts[i].ID())
 	}
 
 	// Reply with random peers to every message
@@ -364,7 +364,7 @@ func TestMultipleQueries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.Update(ctx, hosts[1].ID())
+	d.peerFound(ctx, hosts[1].ID())
 
 	// It would be nice to be able to just get a value and succeed but then
 	// we'd need to deal with selectors and validators...

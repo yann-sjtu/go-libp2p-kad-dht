@@ -50,6 +50,7 @@ type Options struct {
 		RefreshPeriod       time.Duration
 		AutoRefresh         bool
 		LatencyTolerance    time.Duration
+		CleanupInterval     time.Duration
 	}
 }
 
@@ -79,7 +80,7 @@ var Defaults = func(o *Options) error {
 
 	o.RoutingTable.LatencyTolerance = time.Minute
 	o.RoutingTable.RefreshQueryTimeout = 10 * time.Second
-	o.RoutingTable.RefreshPeriod = 1 * time.Hour
+	o.RoutingTable.RefreshPeriod = 10 * time.Minute
 	o.RoutingTable.AutoRefresh = true
 	o.MaxRecordAge = time.Hour * 36
 
@@ -87,6 +88,14 @@ var Defaults = func(o *Options) error {
 	o.Concurrency = 3
 
 	return nil
+}
+
+// RoutingTableCleanupInterval is the interval between two runs of the RT cleanup routine.
+func RoutingTableCleanupInterval(i time.Duration) Option {
+	return func(o *Options) error {
+		o.RoutingTable.CleanupInterval = i
+		return nil
+	}
 }
 
 // RoutingTableLatencyTolerance sets the maximum acceptable latency for peers
